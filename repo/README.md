@@ -1,0 +1,162 @@
+# SentinelDesk Fullstack Monorepo
+
+SentinelDesk is an on-prem, offline-capable newsroom platform with local auth, versioned APIs, ingestion/dedup workflows, finance controls, immutable auditing, and local operations tooling.
+
+## Architecture
+
+- `frontend/` - React + TypeScript web console
+- `backend/` - NestJS + TypeScript API
+- `docker-compose.yml` - PostgreSQL + Redis + backend + frontend
+
+## One-Command Startup
+
+Run the full stack with one command from `fullstack/`:
+
+```bash
+docker compose up --build
+```
+
+No manual migration step is required. The backend container applies Prisma migrations during startup.
+
+Payment channel signature verification requires all channel secrets to be configured at startup:
+
+- `CHANNEL_SECRET_PREPAID_BALANCE`
+- `CHANNEL_SECRET_INVOICE_CREDIT`
+- `CHANNEL_SECRET_PURCHASE_ORDER_SETTLEMENT`
+
+`docker-compose.yml` provides local development values for these secrets.
+
+## Services and Ports
+
+- Frontend: `http://localhost:5173`
+- Backend API base: `http://localhost:3000/api`
+- OpenAPI v1: `http://localhost:3000/openapi/v1`
+- OpenAPI v2: `http://localhost:3000/openapi/v2`
+- PostgreSQL: `localhost:5432`
+- Redis: `localhost:6379`
+
+## Seeded Accounts and Credential Safety
+
+- In `development` and `test`, deterministic seed credentials are enabled for local usability.
+- In non-development environments, deterministic seeded passwords are disabled by default.
+- Optional override flags (use only when explicitly needed):
+  - `ALLOW_DETERMINISTIC_SEED_CREDENTIALS=true` (allow deterministic user creation)
+  - `ALLOW_DEFAULT_SEED_PASSWORD_LOGIN=true` (temporarily allow login with known default seeded passwords)
+- Default seeded username/password pairs (development/test only unless overrides are enabled):
+  - `admin` / `ChangeMeNow123`
+  - `editor` / `EditorNow123`
+  - `finance_reviewer` / `FinanceNow123`
+  - `auditor` / `AuditorNow123`
+- Password minimum length: 12
+- Lockout: 5 failed attempts for 15 minutes
+- Session idle timeout: 30 minutes
+- Session absolute timeout: 12 hours
+- Optional TOTP MFA supported
+
+## Mandatory Test Layout
+
+- Core business logic tests: `backend/unit_tests/`
+- Endpoint behavior tests: `backend/API_tests/`
+
+Covered major paths include:
+
+- auth/lockout/session/MFA
+- ingestion parsing
+- dedup/fingerprint behavior
+- merge mandatory note + strategies
+- transaction/refund constraints
+- freeze/release constraints
+- signed channel verification/replay/idempotency
+- role masking/redaction
+- per-user rate limiting
+- audit report CSV export
+
+## One-Click Test Runner
+
+Run all tests with a single command from `fullstack/`:
+
+```bash
+sh ./run_tests.sh
+```
+
+or:
+
+```bash
+npm run test:all
+```
+
+This prints a clear pass/fail summary for:
+
+- backend unit tests
+- backend API tests
+- frontend tests
+
+`run_tests.sh` is acceptance-focused and executes root-level `unit_tests/` and `API_tests/` wrappers.
+It is safe to rerun repeatedly without manual cleanup.
+
+Sample output interpretation:
+
+- `[unit_tests] PASS ...` / `[API_tests] PASS ...` indicate suite-level success.
+- Jest output under each suite provides per-test pass/fail and failure reasons.
+- Final line `total=<n> pass=<n> fail=<n>` is the final acceptance summary.
+
+## Standard Non-Docker Verification
+
+```bash
+npm install
+npm run test:e2e:install --workspace frontend
+npm run verify:standard
+```
+
+`verify:standard` runs backend unit + targeted backend API/e2e + frontend unit/integration + frontend browser E2E.
+
+## Verification Procedure
+
+1. Start stack: `docker compose up --build`
+2. Verify health:
+   - `GET http://localhost:3000/api/v1/health`
+   - `GET http://localhost:3000/api/v1/health/summary`
+3. Verify OpenAPI:
+   - `http://localhost:3000/openapi/v1`
+   - `http://localhost:3000/openapi/v2`
+4. Login with seeded users and verify role-based workspace visibility:
+   - `admin` sees Editor Queue, Transactions, Admin, Audit Reports, Alerts Dashboard, and Security
+   - `editor` sees Ingestion, Editor Queue, and Security
+   - `finance_reviewer` sees Transactions and Security
+   - `auditor` sees Transactions, Audit Reports, and Security
+5. Run tests: `npm run test:all`
+
+## Operations: Jobs, Backup, Retention
+
+Queue-driven on-host jobs run locally for:
+
+- reconciliation
+- notification banners
+- nightly backups (2:00 AM local time)
+
+Backup retention is 30 days.
+Local metrics/logs/traces retention is 14 days.
+
+Restore verification script (2-hour target check):
+
+```bash
+sh backend/scripts/restore_verify.sh <backup-file.sql>
+```
+
+On Windows, run the command from Git Bash or WSL.
+
+Expected success output includes `PASS (<=2h)`.
+
+## Troubleshooting
+
+- Docker engine unavailable:
+  - Start Docker Desktop, then rerun `docker compose up --build`.
+- Backend container exits during boot:
+  - Check logs: `docker compose logs backend`.
+- Port conflicts (3000/5173/5432/6379):
+  - Stop conflicting process or adjust host mapping in `docker-compose.yml`.
+- Tests fail after schema changes:
+  - Docker flow: rerun `docker compose up --build` so backend startup reapplies migrations.
+  - Local backend flow: run `npx prisma migrate deploy` in `backend/`, then rerun `npm run test:all`.
+- Backup script failures:
+  - Ensure `DATABASE_URL` is valid in backend runtime and `pg_dump/psql` are available in container/host context.

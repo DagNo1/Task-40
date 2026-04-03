@@ -1,0 +1,225 @@
+import { INestApplication } from "@nestjs/common";
+import { Test } from "@nestjs/testing";
+import { createHmac } from "crypto";
+import * as request from "supertest";
+import { PaymentChannelsV2Controller } from "../src/api/v2/payment-channels-v2.controller";
+import { AuditLogsService } from "../src/modules/audit-logs/audit-logs.service";
+import { PrismaService } from "../src/modules/prisma/prisma.service";
+import { TransactionsService } from "../src/modules/transactions/transactions.service";
+import { PaymentChannelsService } from "../src/modules/payment-channels/payment-channels.service";
+import { SignatureVerifierService } from "../src/security/signatures/signature-verifier.service";
+
+type StoredRequest = {
+  id: string;
+  channel: string;
+  idempotencyKey: string;
+  nonce: string;
+  payloadHash: string;
+  verificationStatus: string;
+  transactionId?: string | null;
+  rejectionReason?: string;
+  createdAt: Date;
+};
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+}
+
+function sign(channel: string, timestamp: string, nonce: string, idempotencyKey: string, payload: unknown, secret: string): string {
+  const canonicalPayload = stableStringify(payload);
+  const base = `${channel}|${timestamp}|${nonce}|${idempotencyKey}|${canonicalPayload}`;
+  return createHmac("sha256", secret).update(base).digest("hex");
+}
+
+describe("Payment channel replay/idempotency protections (e2e)", () => {
+  let app: INestApplication;
+  const requests: StoredRequest[] = [];
+  let txCounter = 1;
+
+  beforeAll(async () => {
+    process.env.CHANNEL_SECRET_PREPAID_BALANCE = "prepaid-secret";
+    process.env.CHANNEL_SECRET_INVOICE_CREDIT = "invoice-secret";
+    process.env.CHANNEL_SECRET_PURCHASE_ORDER_SETTLEMENT = "po-secret";
+
+    const moduleRef = await Test.createTestingModule({
+      controllers: [PaymentChannelsV2Controller],
+      providers: [
+        PaymentChannelsService,
+        SignatureVerifierService,
+        {
+          provide: TransactionsService,
+          useValue: {
+            postApprovedChargeFromChannel: jest.fn().mockImplementation(() => {
+              const id = `tx-${txCounter++}`;
+              return { id };
+            })
+          }
+        },
+        {
+          provide: PrismaService,
+          useValue: {
+            paymentChannelRequest: {
+              findUnique: jest.fn().mockImplementation(({ where: { channel_idempotencyKey } }: any) => {
+                return (
+                  requests.find(
+                    (item) =>
+                      item.channel === channel_idempotencyKey.channel &&
+                      item.idempotencyKey === channel_idempotencyKey.idempotencyKey
+                  ) ?? null
+                );
+              }),
+              findFirst: jest.fn().mockImplementation(({ where: { channel, nonce } }: any) => {
+                return requests.find((item) => item.channel === channel && item.nonce === nonce) ?? null;
+              }),
+              create: jest.fn().mockImplementation(({ data }: any) => {
+                const created: StoredRequest = {
+                  id: `req-${requests.length + 1}`,
+                  channel: data.channel,
+                  idempotencyKey: data.idempotencyKey,
+                  nonce: data.nonce,
+                  payloadHash: data.payloadHash,
+                  verificationStatus: data.verificationStatus,
+                  transactionId: data.transactionId ?? null,
+                  rejectionReason: data.rejectionReason,
+                  createdAt: new Date()
+                };
+                requests.push(created);
+                return created;
+              })
+            }
+          }
+        },
+        { provide: AuditLogsService, useValue: { write: jest.fn().mockResolvedValue(undefined) } }
+      ]
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it("accepts first signed callback and returns idempotent response for exact duplicate", async () => {
+    const payload = { bundleCount: 2, amountCents: 500, storyVersionId: "sv-1" };
+    const timestamp = `${Date.now()}`;
+    const nonce = "nonce-1";
+    const idempotencyKey = "key-1";
+    const signature = sign("prepaid_balance", timestamp, nonce, idempotencyKey, payload, "prepaid-secret");
+
+    const first = await request(app.getHttpServer())
+      .post("/payment-channels/prepaid_balance/charge")
+      .set("x-system-id", "system-a")
+      .set("x-signature", signature)
+      .set("x-timestamp", timestamp)
+      .set("x-nonce", nonce)
+      .set("x-idempotency-key", idempotencyKey)
+      .send(payload);
+
+    expect(first.status).toBe(201);
+    expect(first.body.status).toBe("ok");
+    expect(first.body.idempotent).toBe(false);
+
+    const second = await request(app.getHttpServer())
+      .post("/payment-channels/prepaid_balance/charge")
+      .set("x-system-id", "system-a")
+      .set("x-signature", signature)
+      .set("x-timestamp", timestamp)
+      .set("x-nonce", nonce)
+      .set("x-idempotency-key", idempotencyKey)
+      .send(payload);
+
+    expect(second.status).toBe(201);
+    expect(second.body.idempotent).toBe(true);
+    expect(second.body.transactionId).toBe(first.body.transactionId);
+  });
+
+  it("rejects idempotency-key reuse with mutated payload", async () => {
+    const originalPayload = { bundleCount: 1, amountCents: 300, storyVersionId: "sv-2" };
+    const timestamp = `${Date.now()}`;
+    const nonce = "nonce-2";
+    const idempotencyKey = "key-2";
+    const originalSig = sign("prepaid_balance", timestamp, nonce, idempotencyKey, originalPayload, "prepaid-secret");
+
+    await request(app.getHttpServer())
+      .post("/payment-channels/prepaid_balance/charge")
+      .set("x-system-id", "system-a")
+      .set("x-signature", originalSig)
+      .set("x-timestamp", timestamp)
+      .set("x-nonce", nonce)
+      .set("x-idempotency-key", idempotencyKey)
+      .send(originalPayload);
+
+    const mutatedPayload = { ...originalPayload, amountCents: 999 };
+    const mutatedSig = sign("prepaid_balance", timestamp, nonce, idempotencyKey, mutatedPayload, "prepaid-secret");
+
+    const response = await request(app.getHttpServer())
+      .post("/payment-channels/prepaid_balance/charge")
+      .set("x-system-id", "system-a")
+      .set("x-signature", mutatedSig)
+      .set("x-timestamp", timestamp)
+      .set("x-nonce", nonce)
+      .set("x-idempotency-key", idempotencyKey)
+      .send(mutatedPayload);
+
+    expect(response.status).toBe(409);
+    expect(response.body.reason).toBe("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
+  });
+
+  it("rejects replayed nonce and stale timestamp", async () => {
+    const freshPayload = { bundleCount: 1, amountCents: 400, storyVersionId: "sv-3" };
+    const freshTimestamp = `${Date.now()}`;
+    const sharedNonce = "nonce-3";
+    const freshSig = sign("prepaid_balance", freshTimestamp, sharedNonce, "key-3", freshPayload, "prepaid-secret");
+
+    const accepted = await request(app.getHttpServer())
+      .post("/payment-channels/prepaid_balance/charge")
+      .set("x-system-id", "system-a")
+      .set("x-signature", freshSig)
+      .set("x-timestamp", freshTimestamp)
+      .set("x-nonce", sharedNonce)
+      .set("x-idempotency-key", "key-3")
+      .send(freshPayload);
+    expect(accepted.status).toBe(201);
+
+    const replayPayload = { bundleCount: 1, amountCents: 410, storyVersionId: "sv-4" };
+    const replayTimestamp = `${Date.now()}`;
+    const replaySig = sign("prepaid_balance", replayTimestamp, sharedNonce, "key-4", replayPayload, "prepaid-secret");
+    const replayResponse = await request(app.getHttpServer())
+      .post("/payment-channels/prepaid_balance/charge")
+      .set("x-system-id", "system-a")
+      .set("x-signature", replaySig)
+      .set("x-timestamp", replayTimestamp)
+      .set("x-nonce", sharedNonce)
+      .set("x-idempotency-key", "key-4")
+      .send(replayPayload);
+
+    expect(replayResponse.status).toBe(409);
+    expect(replayResponse.body.reason).toBe("NONCE_ALREADY_USED");
+
+    const staleTimestamp = `${Date.now() - 6 * 60 * 1000}`;
+    const stalePayload = { bundleCount: 1, amountCents: 200, storyVersionId: "sv-5" };
+    const staleSig = sign("prepaid_balance", staleTimestamp, "nonce-5", "key-5", stalePayload, "prepaid-secret");
+
+    const staleResponse = await request(app.getHttpServer())
+      .post("/payment-channels/prepaid_balance/charge")
+      .set("x-system-id", "system-a")
+      .set("x-signature", staleSig)
+      .set("x-timestamp", staleTimestamp)
+      .set("x-nonce", "nonce-5")
+      .set("x-idempotency-key", "key-5")
+      .send(stalePayload);
+
+    expect(staleResponse.status).toBe(401);
+    expect(staleResponse.body.reason).toBe("REPLAY_WINDOW_EXCEEDED_5_MINUTES");
+  });
+});

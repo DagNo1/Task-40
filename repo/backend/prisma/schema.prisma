@@ -1,0 +1,356 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String         @id @default(uuid())
+  username          String         @unique
+  passwordHash      String
+  mfaEnabled        Boolean        @default(false)
+  mfaSecretCipher   String?
+  failedAttempts    Int            @default(0)
+  lockedUntil       DateTime?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  sessions          Session[]
+  userRoles         UserRole[]
+  auditLogs         ImmutableAuditLog[]
+  vendorContacts    VendorContact[]
+  financialAccounts FinancialAccount[]
+  cleansingEvents   CleansingEvent[]
+  customRateLimit   UserRateLimit?
+}
+
+model Session {
+  id               String   @id @default(uuid())
+  userId           String
+  createdAt        DateTime @default(now())
+  lastActivityAt   DateTime @default(now())
+  expiresAt        DateTime
+  absoluteExpireAt DateTime
+  csrfTokenHash    String
+  revokedAt        DateTime?
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Role {
+  id          String           @id @default(uuid())
+  name        String           @unique
+  description String?
+  createdAt   DateTime         @default(now())
+  userRoles   UserRole[]
+  rolePerms   RolePermission[]
+}
+
+model Permission {
+  id          String           @id @default(uuid())
+  key         String           @unique
+  description String?
+  rolePerms   RolePermission[]
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model ImmutableAuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  actionType String
+  entityType String
+  entityId   String?
+  notes      String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+  user       User?    @relation(fields: [userId], references: [id])
+
+  @@index([createdAt])
+  @@index([actionType])
+}
+
+model Story {
+  id              String              @id @default(uuid())
+  source          String
+  sourceExternalId String?
+  canonicalUrl    String
+  latestTitle     String
+  latestBody      String
+  status          String              @default("active")
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  versions        StoryVersion[]
+  clusterMembers  DedupClusterMember[]
+
+  @@index([canonicalUrl])
+}
+
+model StoryVersion {
+  id                  String   @id @default(uuid())
+  storyId             String
+  versionNumber       Int
+  title               String
+  body                String
+  rawUrl              String
+  canonicalUrl        String
+  source              String
+  sourceExternalId    String?
+  publishedAt         DateTime?
+  contentHash         String
+  simhash             String
+  minhashSignature    String
+  duplicateFlag       Boolean  @default(false)
+  anomalyFlag         Boolean  @default(false)
+  duplicateExplanation String?
+  anomalyExplanation  String?
+  createdAt           DateTime @default(now())
+  story               Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  transactions        Transaction[] @relation("StoryVersionTransactions")
+  refundCases         RefundCase[]  @relation("StoryVersionRefunds")
+
+  @@unique([storyId, versionNumber])
+  @@index([canonicalUrl])
+}
+
+model Transaction {
+  id                String       @id @default(uuid())
+  reference         String       @unique
+  channel           String
+  bundleCount       Int          @default(1)
+  unitPriceCents    Int
+  totalAmountCents  Int
+  currency          String       @default("USD")
+  status            String
+  statusExplanation String
+  storyVersionId    String?
+  createdByUserId   String?
+  approvedByUserId  String?
+  approvedAt        DateTime?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  storyVersion      StoryVersion? @relation("StoryVersionTransactions", fields: [storyVersionId], references: [id])
+  refunds           RefundCase[]
+  freezes           FreezeCase[]
+  ledgerEntries     FundLedger[]
+  channelRequests   PaymentChannelRequest[]
+
+  @@index([status])
+  @@index([storyVersionId])
+}
+
+model PaymentChannelRequest {
+  id                 String      @id @default(uuid())
+  channel            String
+  operation          String
+  systemIdentity     String
+  idempotencyKey     String
+  nonce              String
+  requestTimestamp   DateTime
+  payloadHash        String
+  signature          String
+  verificationStatus String
+  rejectionReason    String?
+  duplicateDetected  Boolean     @default(false)
+  replayDetected     Boolean     @default(false)
+  transactionId      String?
+  responseCode       Int?
+  responseBody       Json?
+  createdAt          DateTime    @default(now())
+  transaction        Transaction? @relation(fields: [transactionId], references: [id])
+
+  @@unique([channel, idempotencyKey])
+  @@index([channel, nonce])
+  @@index([createdAt])
+}
+
+model UserRateLimit {
+  userId            String   @id
+  requestsPerMinute Int      @default(60)
+  updatedByUserId   String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([requestsPerMinute])
+}
+
+model SystemThresholdConfig {
+  key             String   @id
+  value           String
+  description     String?
+  updatedByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model JobRun {
+  id          String   @id @default(uuid())
+  jobType      String
+  status       String
+  startedAt    DateTime @default(now())
+  finishedAt   DateTime?
+  durationMs   Int?
+  details      Json?
+  createdAt    DateTime @default(now())
+
+  @@index([jobType, startedAt])
+  @@index([status, startedAt])
+}
+
+model AlertEvent {
+  id            String   @id @default(uuid())
+  category      String
+  severity      String
+  title         String
+  message       String
+  relatedEntityType String?
+  relatedEntityId String?
+  metadata      Json?
+  status        String   @default("OPEN")
+  createdAt     DateTime @default(now())
+  resolvedAt    DateTime?
+
+  @@index([category, createdAt])
+  @@index([status, createdAt])
+}
+
+model NotificationBanner {
+  id          String   @id @default(uuid())
+  level       String
+  message     String
+  active      Boolean  @default(true)
+  sourceAlertId String?
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime?
+
+  @@index([active, createdAt])
+}
+
+model RefundCase {
+  id             String       @id @default(uuid())
+  transactionId  String
+  storyVersionId String?
+  amountCents    Int
+  type           String
+  reason         String
+  createdByUserId String?
+  createdAt      DateTime     @default(now())
+  transaction    Transaction  @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  storyVersion   StoryVersion? @relation("StoryVersionRefunds", fields: [storyVersionId], references: [id])
+
+  @@index([transactionId])
+  @@index([storyVersionId])
+}
+
+model FreezeCase {
+  id              String      @id @default(uuid())
+  transactionId   String
+  reason          String
+  frozenByUserId  String?
+  frozenAt        DateTime    @default(now())
+  status          String
+  releaseNote     String?
+  releasedByUserId String?
+  releasedAt      DateTime?
+  transaction     Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+  @@index([status])
+}
+
+model FundLedger {
+  id               String      @id @default(uuid())
+  transactionId    String
+  entryType        String
+  amountCents      Int
+  netAmountCents   Int
+  createdByUserId  String?
+  metadata         Json?
+  createdAt        DateTime    @default(now())
+  transaction      Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId, createdAt])
+}
+
+model DedupCluster {
+  id                String              @id @default(uuid())
+  key               String              @unique
+  reason            String
+  confidence        Float
+  similarityDetails Json
+  explanation       String
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  members           DedupClusterMember[]
+}
+
+model DedupClusterMember {
+  id              String       @id @default(uuid())
+  clusterId       String
+  storyId         String
+  confidence      Float
+  similarityScore Float
+  groupedBy       String
+  createdAt       DateTime     @default(now())
+  cluster         DedupCluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  story           Story        @relation(fields: [storyId], references: [id], onDelete: Cascade)
+
+  @@unique([clusterId, storyId])
+  @@index([storyId])
+}
+
+model CleansingEvent {
+  id             String   @id @default(uuid())
+  storyVersionId String?
+  userId         String?
+  action         String
+  field          String
+  beforeValue    String?
+  afterValue     String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+  user           User?    @relation(fields: [userId], references: [id])
+
+  @@index([createdAt])
+  @@index([storyVersionId])
+}
+
+model VendorContact {
+  id             String   @id @default(uuid())
+  userId         String
+  encryptedEmail String
+  encryptedPhone String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model FinancialAccount {
+  id                    String   @id @default(uuid())
+  userId                String
+  encryptedAccountId    String
+  encryptedVendorHandle String
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
