@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import type { InputJsonValue } from "@prisma/client/runtime/library";
 import { PrismaService } from "../prisma/prisma.service";
 import { FingerprintService } from "./fingerprint.service";
 
@@ -14,7 +15,7 @@ export interface DedupOutcome {
   explanation: string;
   groupedBy: string;
   clusterId?: string;
-  details: Record<string, unknown>;
+  details: InputJsonValue;
 }
 
 interface MatchCandidate {

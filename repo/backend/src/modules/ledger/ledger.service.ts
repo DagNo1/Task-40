@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import type { InputJsonValue } from "@prisma/client/runtime/library";
 import { PrismaService } from "../prisma/prisma.service";
 
 @Injectable()
@@ -10,7 +11,7 @@ export class LedgerService {
     entryType: "CHARGE" | "REFUND" | "FREEZE" | "RELEASE";
     amountCents: number;
     createdByUserId?: string;
-    metadata?: Record<string, unknown>;
+    metadata?: InputJsonValue;
   }) {
     const latest = await this.prisma.fundLedger.findFirst({
       where: { transactionId: input.transactionId },

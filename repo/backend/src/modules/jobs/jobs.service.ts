@@ -1,4 +1,5 @@
 import { Injectable, OnModuleInit } from "@nestjs/common";
+import type { InputJsonValue } from "@prisma/client/runtime/library";
 import { join } from "path";
 import { AuditLogsService } from "../audit-logs/audit-logs.service";
 import { PrismaService } from "../prisma/prisma.service";
@@ -94,7 +95,7 @@ export class JobsService implements OnModuleInit {
       data: {
         jobType: type,
         status: "RUNNING",
-        details: payload ?? {}
+        details: (payload ?? {}) as InputJsonValue
       }
     });
 
@@ -126,7 +127,7 @@ export class JobsService implements OnModuleInit {
           status: "FAILED",
           finishedAt: new Date(),
           durationMs: Date.now() - started,
-          details: { error: message }
+          details: { error: message } as InputJsonValue
         }
       });
 

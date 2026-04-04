@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import type { InputJsonValue } from "@prisma/client/runtime/library";
 import { HotReadCacheService } from "../cache/hot-read-cache.service";
 import { PrismaService } from "../prisma/prisma.service";
 
@@ -8,7 +9,7 @@ interface AuditInput {
   entityType: string;
   entityId?: string;
   notes: string;
-  metadata?: Record<string, unknown>;
+  metadata?: InputJsonValue;
 }
 
 @Injectable()

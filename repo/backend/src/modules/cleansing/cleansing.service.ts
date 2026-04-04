@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import type { InputJsonValue } from "@prisma/client/runtime/library";
 import { createHash } from "crypto";
 import { PrismaService } from "../prisma/prisma.service";
 
@@ -28,7 +29,7 @@ interface CleansingEventDraft {
   field: string;
   beforeValue?: string;
   afterValue?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: InputJsonValue;
 }
 
 @Injectable()
