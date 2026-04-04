@@ -93,6 +93,7 @@ This prints a clear pass/fail summary for:
 
 `run_tests.sh` is acceptance-focused and executes root-level `unit_tests/` and `API_tests/` wrappers.
 It is safe to rerun repeatedly without manual cleanup.
+In clean CI environments, it auto-installs workspace dependencies when `jest`/`vitest` binaries are missing.
 
 Sample output interpretation:
 

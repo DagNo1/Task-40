@@ -7,6 +7,18 @@ FAIL=0
 
 echo "=== SentinelDesk One-Click Test Runner ==="
 
+if [ ! -x "./backend/node_modules/.bin/jest" ] || [ ! -x "./frontend/node_modules/.bin/vitest" ]; then
+  echo "[preflight] Test runners not found. Installing workspace dependencies (including dev)..."
+  if npm install --include=dev; then
+    echo "[preflight] Dependency install complete"
+  else
+    echo "[preflight] Dependency install failed"
+    echo "=== Final Summary ==="
+    echo "total=${TOTAL} pass=${PASS} fail=${TOTAL}"
+    exit 1
+  fi
+fi
+
 echo "[1/2] unit_tests"
 if sh ./unit_tests/run.sh; then
   PASS=$((PASS + 1))
